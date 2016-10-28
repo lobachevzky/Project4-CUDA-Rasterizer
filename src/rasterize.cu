@@ -82,7 +82,7 @@ namespace {
     // but always feel free to modify on your own
 
      glm::vec3 viewPos;  // eye space position used for shading
-     glm::vec3 viewNor;
+     glm::vec3 viewNorm;
      TextureData* diffuseTex;
     // ...
   };
@@ -722,9 +722,18 @@ const Primitive *primitives, unsigned int *depths, Fragment *fragments) {
   AABB aabb = getAABBForTriangle(tri);
   range(y, aabb.min.y, aabb.max.y) {
     range(x, aabb.min.x, aabb.max.x) {
+
+      // zero out values of fragment struct
+      int fragmentId = getIndex(x, y, width);
+      Fragment &fragment = fragments[fragmentId];
+      fragment.viewPos = glm::vec3(0);
+      fragment.viewNorm = glm::vec3(0);
+      fragment.color = glm::vec3(0);
+
       range(offset, 0, samplesPerPixel) {
-        int fragmentId = getIndex(x, y, width);
         int sampleId = samplesPerPixel * fragmentId + offset;
+
+        // determine if screenPos is inside polygon
         glm::vec3 barycentricCoord = calculateBarycentricCoordinate(tri, glm::vec2(x, y));
         if (isBarycentricCoordInBounds(barycentricCoord)) {
           unsigned int depth = getFragmentDepth(barycentricCoord, tri);
@@ -745,36 +754,41 @@ const Primitive *primitives, unsigned int *depths, Fragment *fragments) {
       range(offset, 0, samplesPerPixel) {
         int fragmentId = getIndex(x, y, width);
         int sampleId = samplesPerPixel * fragmentId + offset;
-        glm::vec2 viewPos = glm::vec2(x, y);
-        glm::vec3 barycentricCoord = calculateBarycentricCoordinate(tri, viewPos);
+        glm::vec2 screenPos = glm::vec2(x, y);
 
+        // determine if screenPos is inside polygon
+        glm::vec3 barycentricCoord = calculateBarycentricCoordinate(tri, screenPos);
         if (isBarycentricCoordInBounds(barycentricCoord)) {
           float depth = getFragmentDepth(barycentricCoord, tri);
+
+          // if the sample is not occluded
           if ((unsigned int)depth == depths[sampleId]) {
             Fragment &fragment = fragments[fragmentId];
 
-            //fragment.dev_diffuseTex = primitive.dev_diffuseTex;
-            fragment.viewPos = glm::vec3(viewPos, depth);
-            fragment.viewNor = glm::vec3(0);
+            atomicAddVec3(fragment.viewPos, glm::vec3(screenPos, depth) / (float)samplesPerPixel);
+
+            // interpolate texcoord and texnorm
+            fragment.viewNorm = glm::vec3(0);
             glm::vec2 texcoord(0);
             float texWeightNorm = 0;
-
             int k;
             range(k, 0, 3) {
               float weight = barycentricCoord[k];
               Vertex v = primitive.v[k];
-              fragment.viewNor += weight * v.viewNor;
+              atomicAddVec3(fragment.viewNorm, weight * v.viewNor / (float)samplesPerPixel);
               float texWeight = weight / v.viewPos.z;
               texcoord += texWeight * v.texcoord0;
               texWeightNorm += texWeight;
             }
 
+            // get the color using texcoord
             texcoord /= texWeightNorm;
             glm::vec2 texRes = primitive.texRes;
             glm::vec2 scaledCoord = texcoord * glm::vec2(texRes.x, texRes.y);
             int tid = 3 * getIndex((int)scaledCoord.x, (int)scaledCoord.y, texRes.x);
-            TextureData *tex = primitive.diffuseTex;
-            fragment.color = glm::vec3(tex[tid + 0], tex[tid + 1], tex[tid + 2]) / 255.0f;
+            TextureData *tex = primitive.diffuseTex; 
+            glm::vec3 color = glm::vec3(tex[tid + 0], tex[tid + 1], tex[tid + 2]) / 255.0f;
+            atomicAddVec3(fragment.color, color / (float)samplesPerPixel);
           }
         }
       }
@@ -794,7 +808,7 @@ void _render(int w, int h, const Fragment *fragmentBuffer, glm::vec3 *framebuffe
   glm::vec3 L = glm::normalize(glm::vec3(0, 1, 1));//lightPos - frag.viewPos);
   glm::vec3 V = glm::normalize(-frag.viewPos);
   glm::vec3 H = glm::normalize(L + V);
-  float intensity = saturate(glm::dot(frag.viewNor, H) + 0.2);
+  float intensity = saturate(glm::dot(frag.viewNorm, H) + 0.2);
   if (SHOW_TEXTURE) {
     intensity = 1;
   }
